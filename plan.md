@@ -26,10 +26,10 @@ This plan outlines the next phases of development for the terminal-based to-do l
     - [x] Add a `tags: Vec<String>` field to the `Task` struct.
     - [x] Allow users to add tags to tasks in the input/edit mode (e.g., "buy milk #shopping #urgent").
     - [x] Display tags alongside the task description.
-- [ ] **Search/Filter Functionality:**
-    - [ ] Implement a "search mode" triggered by a keybinding (e.g., `/`).
-    - [ ] Allow users to filter the task list by description, priority, due date, or tags.
-    - [ ] Display the current search query in the UI.
+- [x] **Search/Filter Functionality:**
+    - [x] Implement a "search mode" triggered by a keybinding (e.g., `/`).
+    - [x] Allow users to filter the task list by description, priority, due date, or tags.
+    - [x] Display the current search query in the UI.
 
 ## Phase 3: UI/UX and Polish
 - [ ] **Themes and Custom Colors:**
