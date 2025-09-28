@@ -1,4 +1,5 @@
-use crate::task::{load_tasks, save_tasks, Task, Priority};
+use crate::task::{load_tasks, save_tasks, Priority, Task};
+use crate::theme::ThemeManager;
 use chrono::prelude::*;
 use chrono_english::{parse_date_string, Dialect};
 use ratatui::widgets::ListState;
@@ -9,6 +10,19 @@ pub enum AppMode {
     Insert,
     DateInput,
     Search,
+    Confirm,
+    Help,
+}
+
+pub struct ConfirmDialog {
+    pub message: String,
+    pub action: ConfirmAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    DeleteTask(usize),
+    DeleteAllCompleted,
 }
 
 pub struct App {
@@ -20,19 +34,20 @@ pub struct App {
     pub search_input: String,
     pub margin: u16,
     pub adding_subtask: bool,
+    pub theme_manager: ThemeManager,
+    pub focus_mode: bool,
+    pub confirm_dialog: Option<ConfirmDialog>,
 }
 
 impl App {
-    pub fn new() -> App {
+    pub fn new_with_theme(theme_manager: ThemeManager) -> App {
         let mut state = ListState::default();
-        if !load_tasks("tasks.json")
-            .unwrap_or_else(|_| Vec::new())
-            .is_empty()
-        {
+        let tasks = load_tasks("tasks.json").unwrap_or_else(|_| Vec::new());
+        if !tasks.is_empty() {
             state.select(Some(0));
         }
         App {
-            tasks: load_tasks("tasks.json").unwrap_or_else(|_| Vec::new()),
+            tasks,
             state,
             mode: AppMode::Normal,
             input: String::new(),
@@ -40,6 +55,9 @@ impl App {
             search_input: String::new(),
             margin: 1,
             adding_subtask: false,
+            theme_manager,
+            focus_mode: false,
+            confirm_dialog: None,
         }
     }
 
@@ -51,13 +69,15 @@ impl App {
         self.margin = self.margin.saturating_add(1);
     }
 
-
     pub fn next(&mut self) {
         let displayed_tasks = self.get_displayed_tasks();
         if displayed_tasks.is_empty() {
             return;
         }
-        let i = self.state.selected().map_or(0, |i| (i + 1) % displayed_tasks.len());
+        let i = self
+            .state
+            .selected()
+            .map_or(0, |i| (i + 1) % displayed_tasks.len());
         self.state.select(Some(i));
     }
 
@@ -66,7 +86,9 @@ impl App {
         if displayed_tasks.is_empty() {
             return;
         }
-        let i = self.state.selected().map_or(0, |i| (i + displayed_tasks.len() - 1) % displayed_tasks.len());
+        let i = self.state.selected().map_or(0, |i| {
+            (i + displayed_tasks.len() - 1) % displayed_tasks.len()
+        });
         self.state.select(Some(i));
     }
 
@@ -99,13 +121,12 @@ impl App {
     }
 
     pub fn save(&self) {
-        save_tasks("tasks.json", &self.tasks).unwrap_or_else(|_| {});
+        save_tasks("tasks.json", &self.tasks).unwrap_or(());
     }
 
     fn extract_date_and_clean_description(&self, input: &str) -> (String, Option<String>) {
         let now = Local::now();
-        let mut cleaned_description = input.to_string();
-        
+
         // First try chrono-english for full natural language parsing
         if let Ok(parsed_date) = parse_date_string(input, now, Dialect::Us) {
             // If chrono-english parsed it successfully, trust its result
@@ -119,20 +140,22 @@ impl App {
 
         // If chrono-english fails, use our smart context-aware parsing
         let time_result = self.parse_time_with_context(input, now);
-        
+
         if let Some((parsed_datetime, matched_text)) = time_result {
             // Remove the matched time/date text from description
-            cleaned_description = input.replace(&matched_text, "")
+            let cleaned_description = input
+                .replace(&matched_text, "")
                 .trim()
                 .replace("  ", " ") // Clean up double spaces
                 .to_string();
-            
-            let due_date = if parsed_datetime.time().hour() != 0 || parsed_datetime.time().minute() != 0 {
-                parsed_datetime.format("%Y-%m-%d %H:%M").to_string()
-            } else {
-                parsed_datetime.format("%Y-%m-%d").to_string()
-            };
-            
+
+            let due_date =
+                if parsed_datetime.time().hour() != 0 || parsed_datetime.time().minute() != 0 {
+                    parsed_datetime.format("%Y-%m-%d %H:%M").to_string()
+                } else {
+                    parsed_datetime.format("%Y-%m-%d").to_string()
+                };
+
             (cleaned_description, Some(due_date))
         } else {
             // No time/date found, return as-is
@@ -140,23 +163,55 @@ impl App {
         }
     }
 
-    fn parse_time_with_context(&self, input: &str, now: DateTime<Local>) -> Option<(DateTime<Local>, String)> {
+    fn parse_time_with_context(
+        &self,
+        input: &str,
+        now: DateTime<Local>,
+    ) -> Option<(DateTime<Local>, String)> {
         let input_lower = input.to_lowercase();
-        
+
         // Explicit date keywords
         if input_lower.contains("today") {
             if let Some((time, matched)) = self.extract_time_from_text(&input_lower) {
-                return Some((now.date_naive().and_time(time).and_local_timezone(Local).unwrap(), matched));
+                return Some((
+                    now.date_naive()
+                        .and_time(time)
+                        .and_local_timezone(Local)
+                        .unwrap(),
+                    matched,
+                ));
             }
-            return Some((now.date_naive().and_hms_opt(23, 59, 0).unwrap().and_local_timezone(Local).unwrap(), "today".to_string()));
+            return Some((
+                now.date_naive()
+                    .and_hms_opt(23, 59, 0)
+                    .unwrap()
+                    .and_local_timezone(Local)
+                    .unwrap(),
+                "today".to_string(),
+            ));
         }
-        
+
         if input_lower.contains("tomorrow") {
             let tomorrow = now + chrono::Duration::days(1);
             if let Some((time, matched)) = self.extract_time_from_text(&input_lower) {
-                return Some((tomorrow.date_naive().and_time(time).and_local_timezone(Local).unwrap(), matched));
+                return Some((
+                    tomorrow
+                        .date_naive()
+                        .and_time(time)
+                        .and_local_timezone(Local)
+                        .unwrap(),
+                    matched,
+                ));
             }
-            return Some((tomorrow.date_naive().and_hms_opt(9, 0, 0).unwrap().and_local_timezone(Local).unwrap(), "tomorrow".to_string()));
+            return Some((
+                tomorrow
+                    .date_naive()
+                    .and_hms_opt(9, 0, 0)
+                    .unwrap()
+                    .and_local_timezone(Local)
+                    .unwrap(),
+                "tomorrow".to_string(),
+            ));
         }
 
         // Smart time parsing with context awareness
@@ -168,17 +223,26 @@ impl App {
                 // Time hasn't passed today, schedule for today
                 now
             };
-            
-            let target_datetime = target_date.date_naive()
+
+            let target_datetime = target_date
+                .date_naive()
                 .and_time(parsed_time)
                 .and_local_timezone(Local)
                 .unwrap();
-                
+
             return Some((target_datetime, matched_text));
         }
 
         // Day of week parsing
-        let weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+        let weekdays = [
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        ];
         for (i, day) in weekdays.iter().enumerate() {
             if input_lower.contains(day) {
                 let target_date = self.get_next_weekday(now, i);
@@ -187,8 +251,14 @@ impl App {
                 } else {
                     chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap() // Default to 9 AM
                 };
-                
-                return Some((target_date.and_time(time).and_local_timezone(Local).unwrap(), day.to_string()));
+
+                return Some((
+                    target_date
+                        .and_time(time)
+                        .and_local_timezone(Local)
+                        .unwrap(),
+                    day.to_string(),
+                ));
             }
         }
 
@@ -212,20 +282,24 @@ impl App {
             if let Ok(re) = Regex::new(pattern) {
                 if let Some(captures) = re.captures(text) {
                     let matched_text = captures.get(0).unwrap().as_str().to_string();
-                    
+
                     let hour: u32 = captures.get(1).unwrap().as_str().parse().ok()?;
                     let minute: u32 = if has_minutes {
                         captures.get(2).unwrap().as_str().parse().ok()?
                     } else {
                         0
                     };
-                    
+
                     let is_pm = if has_minutes {
-                        captures.get(3).map_or(false, |m| m.as_str().to_lowercase().contains('p'))
+                        captures
+                            .get(3)
+                            .is_some_and(|m| m.as_str().to_lowercase().contains('p'))
                     } else {
-                        captures.get(2).map_or(false, |m| m.as_str().to_lowercase().contains('p'))
+                        captures
+                            .get(2)
+                            .is_some_and(|m| m.as_str().to_lowercase().contains('p'))
                     };
-                    
+
                     // Convert to 24-hour format
                     let hour_24 = if is_pm && hour != 12 {
                         hour + 12
@@ -234,14 +308,14 @@ impl App {
                     } else {
                         hour
                     };
-                    
+
                     if let Some(time) = chrono::NaiveTime::from_hms_opt(hour_24, minute, 0) {
                         return Some((time, matched_text));
                     }
                 }
             }
         }
-        
+
         None
     }
 
@@ -252,7 +326,7 @@ impl App {
         } else {
             7 - (current_weekday - target_weekday)
         };
-        
+
         (now + chrono::Duration::days(days_until_target as i64)).date_naive()
     }
 
@@ -262,7 +336,8 @@ impl App {
             self.adding_subtask = false;
         } else {
             let new_id = self.tasks.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-            let (cleaned_description, due_date) = self.extract_date_and_clean_description(&self.input);
+            let (cleaned_description, due_date) =
+                self.extract_date_and_clean_description(&self.input);
             let tags = self
                 .input
                 .split_whitespace()
@@ -280,7 +355,7 @@ impl App {
                 completed: false,
                 priority: Priority::Medium,
                 due_date,
-                sub_tasks: Box::new(Vec::new()),
+                sub_tasks: Vec::new(),
                 tags,
             };
             self.tasks.push(new_task);
@@ -294,9 +369,10 @@ impl App {
             let displayed_tasks = self.get_displayed_tasks();
             if let Some(selected_task) = displayed_tasks.get(selected_index) {
                 let selected_task_id = selected_task.id;
-                
+
                 // Extract data before getting mutable reference
-                let (cleaned_description, due_date) = self.extract_date_and_clean_description(&self.input);
+                let (cleaned_description, due_date) =
+                    self.extract_date_and_clean_description(&self.input);
                 let tags = self
                     .input
                     .split_whitespace()
@@ -318,7 +394,7 @@ impl App {
                         completed: false,
                         priority: Priority::Medium,
                         due_date,
-                        sub_tasks: Box::new(Vec::new()),
+                        sub_tasks: Vec::new(),
                         tags,
                     };
                     main_task.sub_tasks.push(new_task);
@@ -346,19 +422,20 @@ impl App {
         if let Some(selected_index) = self.state.selected() {
             let displayed_tasks = self.get_displayed_tasks();
             if let Some(selected_task) = displayed_tasks.get(selected_index) {
-                // Find and remove the task in the main tasks vector by ID
+                // Find the task index in the main tasks vector
                 if let Some(main_index) = self.tasks.iter().position(|t| t.id == selected_task.id) {
-                    self.tasks.remove(main_index);
-                }
-                
-                // Update selection
-                let new_displayed_tasks = self.get_displayed_tasks();
-                if !new_displayed_tasks.is_empty() {
-                    self.state.select(Some(selected_index.min(new_displayed_tasks.len() - 1)));
-                } else {
-                    self.state.select(None);
+                    let message = format!("Delete task: '{}'?", selected_task.description);
+                    self.show_confirm_dialog(message, ConfirmAction::DeleteTask(main_index));
                 }
             }
+        }
+    }
+
+    pub fn delete_all_completed(&mut self) {
+        let completed_count = self.tasks.iter().filter(|t| t.completed).count();
+        if completed_count > 0 {
+            let message = format!("Delete {} completed task(s)?", completed_count);
+            self.show_confirm_dialog(message, ConfirmAction::DeleteAllCompleted);
         }
     }
 
@@ -389,7 +466,7 @@ impl App {
                         _ => false,
                     }
                     // Filter by due date (if it exists)
-                    || task.due_date.as_ref().map_or(false, |date| date.contains(&search_lower))
+                    || task.due_date.as_ref().is_some_and(|date| date.contains(&search_lower))
                     // Filter by subtasks content
                     || task.sub_tasks.iter().any(|subtask| {
                         subtask.description.to_lowercase().contains(&search_lower)
@@ -401,9 +478,117 @@ impl App {
     }
 
     pub fn get_displayed_tasks(&self) -> Vec<Task> {
-        match self.mode {
+        let mut tasks = match self.mode {
             AppMode::Search if !self.search_input.is_empty() => self.filter_tasks(),
             _ => self.tasks.clone(),
+        };
+
+        // Apply focus mode filter
+        if self.focus_mode {
+            tasks.retain(|task| !task.completed);
         }
+
+        tasks
+    }
+
+    pub fn toggle_focus_mode(&mut self) {
+        self.focus_mode = !self.focus_mode;
+        // Reset selection when toggling focus mode
+        let displayed_tasks = self.get_displayed_tasks();
+        if displayed_tasks.is_empty() {
+            self.state.select(None);
+        } else {
+            self.state.select(Some(0));
+        }
+    }
+
+    pub fn show_confirm_dialog(&mut self, message: String, action: ConfirmAction) {
+        self.confirm_dialog = Some(ConfirmDialog { message, action });
+        self.mode = AppMode::Confirm;
+    }
+
+    pub fn hide_confirm_dialog(&mut self) {
+        self.confirm_dialog = None;
+        self.mode = AppMode::Normal;
+    }
+
+    pub fn execute_confirm_action(&mut self) {
+        if let Some(dialog) = &self.confirm_dialog {
+            match &dialog.action {
+                ConfirmAction::DeleteTask(task_index) => {
+                    if *task_index < self.tasks.len() {
+                        self.tasks.remove(*task_index);
+                        let displayed_tasks = self.get_displayed_tasks();
+                        if !displayed_tasks.is_empty() {
+                            let new_index = (*task_index).min(displayed_tasks.len() - 1);
+                            self.state.select(Some(new_index));
+                        } else {
+                            self.state.select(None);
+                        }
+                    }
+                }
+                ConfirmAction::DeleteAllCompleted => {
+                    self.tasks.retain(|task| !task.completed);
+                    let displayed_tasks = self.get_displayed_tasks();
+                    if !displayed_tasks.is_empty() {
+                        self.state.select(Some(0));
+                    } else {
+                        self.state.select(None);
+                    }
+                }
+            }
+        }
+        self.hide_confirm_dialog();
+    }
+
+    pub fn show_help(&mut self) {
+        self.mode = AppMode::Help;
+    }
+
+    pub fn hide_help(&mut self) {
+        self.mode = AppMode::Normal;
+    }
+
+    pub fn cycle_theme(&mut self) {
+        let available_themes = self.theme_manager.get_available_themes();
+        if available_themes.is_empty() {
+            return;
+        }
+
+        let current_theme_name = &self.theme_manager.get_current_theme().name;
+
+        // Find current theme index by matching theme names
+        let current_index = available_themes
+            .iter()
+            .position(|theme_key| {
+                if let Some(theme) = self.theme_manager.get_theme_by_key(theme_key) {
+                    theme.name == *current_theme_name
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(0);
+
+        let next_index = (current_index + 1) % available_themes.len();
+        let next_theme_name = &available_themes[next_index];
+
+        if self.theme_manager.set_theme(next_theme_name).is_err() {
+            // If setting fails, try to set to the first available theme
+            if let Some(first_theme) = available_themes.first() {
+                let _ = self.theme_manager.set_theme(first_theme);
+            }
+        }
+    }
+
+    pub fn get_available_theme_names(&self) -> Vec<String> {
+        self.theme_manager
+            .get_available_themes()
+            .iter()
+            .filter_map(|key| {
+                self.theme_manager
+                    .get_theme_by_key(key)
+                    .map(|theme| theme.name.clone())
+            })
+            .collect()
     }
 }

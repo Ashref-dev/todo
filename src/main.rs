@@ -1,7 +1,9 @@
 use crate::{
     app::{App, AppMode},
+    theme::ThemeManager,
     ui::ui,
 };
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -15,9 +17,44 @@ use std::{error::Error, io};
 
 mod app;
 mod task;
+mod theme;
 mod ui;
 
+#[derive(Parser)]
+#[command(name = "todo")]
+#[command(about = "A terminal-based todo list with advanced features")]
+#[command(version = "1.0")]
+struct Cli {
+    /// Theme to use (catppuccin-mocha, catppuccin-latte, dracula, gruvbox-dark, nord)
+    #[arg(short, long, default_value = "catppuccin-mocha")]
+    theme: String,
+
+    /// List available themes
+    #[arg(long)]
+    list_themes: bool,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+
+    // Initialize theme manager
+    let mut theme_manager = ThemeManager::new();
+
+    // Handle list themes command
+    if cli.list_themes {
+        println!("Available themes:");
+        for theme_name in theme_manager.get_available_themes() {
+            println!("  {}", theme_name);
+        }
+        return Ok(());
+    }
+
+    // Set the requested theme
+    if let Err(e) = theme_manager.set_theme(&cli.theme) {
+        eprintln!("Warning: {}", e);
+        eprintln!("Using default theme instead.");
+    }
+
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -26,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // create app and run it
-    let app = App::new();
+    let app = App::new_with_theme(theme_manager);
     let res = run_app(&mut terminal, app);
 
     // restore terminal
@@ -47,7 +84,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<()> {
     loop {
-        terminal.draw(|f| ui::<B>(f, &mut app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
             match app.mode {
@@ -62,15 +99,19 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     KeyCode::Char('a') => {
                         app.adding_subtask = false;
                         app.mode = AppMode::Insert;
-                    },
+                    }
                     KeyCode::Char('d') => app.delete_task(),
                     KeyCode::Char('p') => app.cycle_priority(),
                     KeyCode::Char('D') => app.mode = AppMode::DateInput,
                     KeyCode::Char('s') => {
                         app.adding_subtask = true;
                         app.mode = AppMode::Insert;
-                    },
+                    }
                     KeyCode::Char('/') => app.mode = AppMode::Search,
+                    KeyCode::Char('f') => app.toggle_focus_mode(),
+                    KeyCode::Char('C') => app.delete_all_completed(),
+                    KeyCode::Char('h') | KeyCode::F(1) => app.show_help(),
+                    KeyCode::Char('t') => app.cycle_theme(),
                     KeyCode::Char('+') => app.zoom_in(),
                     KeyCode::Char('-') => app.zoom_out(),
                     _ => {}
@@ -84,7 +125,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     KeyCode::Esc => {
                         app.adding_subtask = false;
                         app.mode = AppMode::Normal;
-                    },
+                    }
                     _ => {}
                 },
                 AppMode::DateInput => match key.code {
@@ -101,6 +142,21 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<(
                     KeyCode::Char(c) => app.search_input.push(c),
                     KeyCode::Backspace => {
                         app.search_input.pop();
+                    }
+                    _ => {}
+                },
+                AppMode::Confirm => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        app.execute_confirm_action();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.hide_confirm_dialog();
+                    }
+                    _ => {}
+                },
+                AppMode::Help => match key.code {
+                    KeyCode::Esc | KeyCode::Char('h') | KeyCode::F(1) | KeyCode::Char('q') => {
+                        app.hide_help();
                     }
                     _ => {}
                 },
